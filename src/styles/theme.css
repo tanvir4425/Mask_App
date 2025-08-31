@@ -1,0 +1,42 @@
+/* Core palette for Mask — dark neo-noir with electric gradient accents */
+:root {
+  /* Light */
+  --bg:        #F7F8FA;
+  --surface:   #FFFFFF;
+  --surface-2: #F2F4F7;
+  --text:      #0E1217;
+  --muted:     #667085;
+  --ring:      #E5E7EB;
+  --glass:     rgba(0,0,0,.04);
+
+  /* Brand accent */
+  --accent-a:  #00D4FF; /* cyan */
+  --accent-b:  #7C3AED; /* violet */
+
+  /* Feedback */
+  --success:   #22C55E;
+  --danger:    #EF4444;
+  --warn:      #F59E0B;
+}
+
+/* Dark variant (tinted, not pure black) */
+html.dark {
+  --bg:        #0B0F14;
+  --surface:   #11151C;
+  --surface-2: #161B22;
+  --text:      #E6EAF2;
+  --muted:     #9AA3B2;
+  --ring:      #2B3340;
+  --glass:     rgba(255,255,255,.06);
+}
+
+/* Helpers */
+.mask-brand-gradient {
+  background: linear-gradient(135deg, var(--accent-a), var(--accent-b));
+}
+.mask-gradient-text {
+  background: linear-gradient(135deg, var(--accent-a), var(--accent-b));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}

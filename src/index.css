@@ -1,0 +1,49 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+/* src/index.css */
+html, body, #root { height: 100%; }
+
+
+
+/* === Mask home backgrounds (light & dark) === */
+
+/* Light: "Paper Mist" — soft warm & cool glows over a clean paper gradient */
+:root {
+  --mask-app-bg: 
+    radial-gradient(800px 500px at -10% 0%, rgba(255, 210, 160, 0.22), transparent 60%),
+    radial-gradient(700px 400px at 110% -10%, rgba(120, 200, 255, 0.18), transparent 55%),
+    linear-gradient(180deg, #f7f9fc 0%, #f6f8fb 60%, #f4f7fb 100%);
+}
+
+/* Dark: "Nocturne Mist" — deep charcoal with faint indigo/cyan atmosphere */
+.dark {
+  --mask-app-bg:
+    radial-gradient(900px 500px at -10% -10%, rgba(183,132,255,0.10), transparent 60%),
+    radial-gradient(900px 600px at 110% 0%, rgba(0,212,255,0.10), transparent 55%),
+    linear-gradient(180deg, #0b1117 0%, #0c1219 60%, #0a1116 100%);
+}
+
+/* Apply to the whole app */
+body {
+  background: var(--mask-app-bg) !important;
+  background-attachment: fixed;           /* smooth while scrolling */
+}
+
+/* OPTIONAL: super-subtle dot texture (disabled by default) */
+/*
+#root::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image: radial-gradient(rgba(0,0,0,0.07) 1px, transparent 1px);
+  background-size: 26px 26px;
+  opacity: .18;
+  z-index: 0;
+}
+.dark #root::before {
+  background-image: radial-gradient(rgba(255,255,255,0.06) 1px, transparent 1px);
+  opacity: .15;
+}
+*/

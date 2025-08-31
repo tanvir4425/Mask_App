@@ -1,0 +1,42 @@
+[
+  {
+    "type": "containsAll",
+    "keywords": ["bangladesh", "biggest country"],
+    "verdict": "false",
+    "confidence": 0.9
+  },
+  {
+    "type": "numberRange",
+    "patterns": ["eiffel", "eiffel tower"],
+    "trueRange": [300, 330],
+    "trueVerdict": "true",
+    "confidenceTrue": 0.85,
+    "ifOutsideVerdict": "false",
+    "confidenceFalse": 0.9
+  },
+  {
+    "type": "containsAll",
+    "keywords": ["is a free country"],
+    "verdict": "opinion",
+    "confidence": 0.6
+  },
+  {
+    "type": "regex",
+    "pattern": "donald\\s+trump\\s+is\\s+the\\s+current\\s+us\\s+president",
+    "flags": "i",
+    "verdict": "false",
+    "confidence": 0.9
+  },
+  {
+    "type": "equals",
+    "text": "The moon is made of cheese",
+    "verdict": "false",
+    "confidence": 0.95
+  },
+  {
+    "type": "containsAny",
+    "keywords": ["earth orbits the sun", "the earth goes around the sun"],
+    "verdict": "true",
+    "confidence": 0.9
+  }
+]

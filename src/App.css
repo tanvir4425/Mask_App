@@ -1,0 +1,17 @@
+/* src/index.css (or App.css) */
+
+/* 1. Reset default margin/padding */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+/* 2. Apply a pleasant font & background */
+body {
+  font-family: 'Inter', sans-serif;
+  background-color: #f3f4f6; /* gray-100 */
+  color: #1f2937;            /* gray-800 for text */
+}
+
+/* 3. Tailwind’s base styles (if using CDN) are already in index.html */

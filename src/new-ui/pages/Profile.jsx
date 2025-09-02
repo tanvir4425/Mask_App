@@ -1,7 +1,16 @@
 // src/new-ui/pages/Profile.jsx
 import React, { useEffect, useState, useCallback } from "react";
-import { useParams } from "react-router-dom";
+import { useParams, useNavigate } from "react-router-dom";
 import PostCard from "../PostCard";
+
+import {
+  createOrGetConversationWith,
+  getFriendRequests,           // used best-effort only
+  sendFriendRequest,
+  acceptFriendRequest,
+  declineFriendRequest,
+  unfriend,
+} from "../api";
 
 /* -------------------------- env-aware fetch helper -------------------------- */
 const API_ORIGIN = (process.env.REACT_APP_API_URL || "").replace(/\/$/, "");
@@ -41,10 +50,15 @@ function getLocalUserLite() {
     return { id: null };
   }
 }
+const sameId = (a, b) => String(a ?? "") === String(b ?? "") && String(a ?? "") !== "";
+
+// messages base in your app:
+const MESSAGES_BASE = "/app/messages";
 
 /* ---------------------------------- page ---------------------------------- */
 export default function ProfilePage() {
   const { id } = useParams();
+  const nav = useNavigate();
   const me = getLocalUserLite();
 
   const [user, setUser] = useState(null);
@@ -52,6 +66,10 @@ export default function ProfilePage() {
   const [isSelf, setIsSelf] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [err, setErr] = useState("");
+
+  // relationship ui state: 'none' | 'outgoing' | 'incoming' | 'friends'
+  const [rel, setRel] = useState("none");
+  const [relReqId, setRelReqId] = useState(null);
 
   const load = useCallback(async () => {
     try {
@@ -61,15 +79,54 @@ export default function ProfilePage() {
       ]);
       setUser(u || null);
       setPosts(Array.isArray(feed) ? feed : []);
-      setIsSelf(String(me.id || "") === String(id || ""));
+      const self = sameId(me.id, id);
+      setIsSelf(self);
       setErr("");
+
+      // best-effort relationship detection (don’t block UI)
+      if (!self && u?._id) {
+        await detectRelationship(u._id);
+      } else {
+        setRel("none");
+        setRelReqId(null);
+      }
     } catch (e) {
       setUser(null);
       setPosts([]);
       setIsSelf(false);
+      setRel("none");
+      setRelReqId(null);
       setErr(e?.message || "Failed to load profile");
     }
   }, [id, me.id]);
+
+  async function detectRelationship(targetUserId) {
+    try {
+      // 1) check if already friends via /me (if your backend exposes it)
+      try {
+        const meFull = await fetchJSON(`/api/users/me`);
+        const friendIds = (meFull?.friends || meFull?.friendIds || []).map(x => String(x?._id || x));
+        if (friendIds.includes(String(targetUserId))) {
+          setRel("friends"); setRelReqId(null); return;
+        }
+      } catch {}
+
+      // 2) look at incoming requests (your API’s friend-requests page shows incoming)
+      try {
+        const incoming = await getFriendRequests().catch(() => []);
+        const inc = (incoming || []).find(r =>
+          sameId(r?.from?._id || r?.fromId, targetUserId) ||
+          sameId(r?.userId, targetUserId) // some UIs flatten sender to userId
+        );
+        if (inc) { setRel("incoming"); setRelReqId(inc._id || inc.id || null); return; }
+      } catch {}
+
+      // fallback
+      setRel("none"); setRelReqId(null);
+    } catch {
+      setRel("none"); setRelReqId(null);
+    }
+  }
 
   useEffect(() => { load(); }, [load]);
 
@@ -83,25 +140,15 @@ export default function ProfilePage() {
     setUploading(true);
     setErr("");
 
-    // Standardize on field name "avatar"
     const fd = new FormData();
     fd.append("avatar", file);
 
     try {
-      // Primary route (Phase 4 backend): POST /api/users/me/avatar
       const data = await fetchJSON(`/api/users/me/avatar`, { method: "POST", body: fd });
-
-      // show instantly (cache bust)
       const url = (data?.avatarURL || data?.avatar || "").replace(/\?t=\d+$/, "");
-      if (url) {
-        const next = `${url}?t=${Date.now()}`;
-        setUser((prev) => ({ ...(prev || {}), avatarURL: next }));
-      }
-
-      // refresh profile quietly
+      if (url) setUser((prev) => ({ ...(prev || {}), avatarURL: `${url}?t=${Date.now()}` }));
       try { await load(); } catch {}
     } catch (eUpload) {
-      // Legacy fallbacks if primary route missing
       const endpoints = [
         `/api/users/${id}/avatar`,
         `/api/me/avatar`,
@@ -112,20 +159,80 @@ export default function ProfilePage() {
       for (const u of endpoints) {
         try {
           const d = await fetchJSON(u, { method: "POST", body: fd });
-          const url =
-            d?.avatarURL || d?.avatar || d?.user?.avatarURL || d?.user?.avatar || "";
-          if (url) {
-            const next = `${url}?t=${Date.now()}`;
-            setUser((prev) => ({ ...(prev || {}), avatarURL: next }));
-          }
-          ok = true;
-          break;
+          const url = d?.avatarURL || d?.avatar || d?.user?.avatarURL || d?.user?.avatar || "";
+          if (url) setUser((prev) => ({ ...(prev || {}), avatarURL: `${url}?t=${Date.now()}` }));
+          ok = true; break;
         } catch {}
       }
       if (!ok) setErr(eUpload?.data?.message || eUpload?.message || "Upload failed. Please try again.");
     } finally {
       try { e.target.value = ""; } catch {}
       setUploading(false);
+    }
+  }
+
+  /* -------------------------- actions: message / friend --------------------- */
+  async function onMessage() {
+    if (!user?._id) return;
+    try {
+      // try to create/open a conversation first
+      const conv = await createOrGetConversationWith(user._id).catch(() => null);
+      if (conv?.id) {
+        nav(`${MESSAGES_BASE}/${conv.id}`);
+      } else {
+        // fall back to “start chat” flow your MessagesPage supports
+        nav(`${MESSAGES_BASE}?to=${user._id}`);
+      }
+    } catch {
+      nav(`${MESSAGES_BASE}?to=${user._id}`);
+    }
+  }
+
+  async function onAddFriend() {
+    if (!user?._id) return;
+    try {
+      const res = await sendFriendRequest(user._id);
+      // optimistic UI: flip to "outgoing"
+      setRel("outgoing");
+      setRelReqId(res?.id || res?._id || null);
+    } catch (e) {
+      setErr(e?.response?.data?.message || e.message || "Failed to send request");
+    }
+  }
+
+  async function onCancelRequest() {
+    try {
+      if (relReqId) await declineFriendRequest(relReqId);
+      setRel("none"); setRelReqId(null);
+    } catch (e) {
+      setErr(e?.response?.data?.message || e.message || "Failed to cancel");
+    }
+  }
+
+  async function onAccept() {
+    try {
+      if (relReqId) await acceptFriendRequest(relReqId);
+      setRel("friends"); setRelReqId(null);
+    } catch (e) {
+      setErr(e?.response?.data?.message || e.message || "Failed to accept");
+    }
+  }
+
+  async function onDecline() {
+    try {
+      if (relReqId) await declineFriendRequest(relReqId);
+      setRel("none"); setRelReqId(null);
+    } catch (e) {
+      setErr(e?.response?.data?.message || e.message || "Failed to decline");
+    }
+  }
+
+  async function onUnfriend() {
+    try {
+      if (user?._id) await unfriend(user._id);
+      setRel("none"); setRelReqId(null);
+    } catch (e) {
+      setErr(e?.response?.data?.message || e.message || "Failed to unfriend");
     }
   }
 
@@ -188,6 +295,62 @@ export default function ProfilePage() {
               <div className="text-sm text-zinc-500 truncate">@{handle}</div>
               {err && <div className="text-xs text-rose-600 dark:text-rose-400 mt-1">{err}</div>}
             </div>
+
+            {/* actions (only when viewing someone else) */}
+            {!isSelf && (
+              <div className="ml-auto flex items-center gap-2">
+                <button
+                  onClick={onMessage}
+                  className="rounded-full px-4 py-2 text-sm font-medium bg-zinc-900 text-white hover:opacity-90 dark:bg-white dark:text-zinc-900"
+                >
+                  Message
+                </button>
+
+                {rel === "none" && (
+                  <button
+                    onClick={onAddFriend}
+                    className="rounded-full px-4 py-2 text-sm font-medium border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                  >
+                    Add friend
+                  </button>
+                )}
+
+                {rel === "outgoing" && (
+                  <button
+                    onClick={onCancelRequest}
+                    className="rounded-full px-4 py-2 text-sm font-medium border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                  >
+                    Cancel request
+                  </button>
+                )}
+
+                {rel === "incoming" && (
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={onAccept}
+                      className="rounded-full px-4 py-2 text-sm font-medium bg-emerald-600 text-white hover:opacity-90"
+                    >
+                      Accept
+                    </button>
+                    <button
+                      onClick={onDecline}
+                      className="rounded-full px-4 py-2 text-sm font-medium border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                    >
+                      Decline
+                    </button>
+                  </div>
+                )}
+
+                {rel === "friends" && (
+                  <button
+                    onClick={onUnfriend}
+                    className="rounded-full px-4 py-2 text-sm font-medium border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                  >
+                    Unfriend
+                  </button>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Posts */}

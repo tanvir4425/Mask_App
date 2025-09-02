@@ -9,7 +9,7 @@ import { useToast } from "../context/ToastContext";
 import { openReportDialog } from "./reportDialog";
 import { useNavigate } from "react-router-dom";
 import FactcheckSheet from "./components/FactcheckSheet";
-import TrustBadge from "./components/TrustBadge"; // ✅ bring back trust badge
+import TrustBadge from "./components/TrustBadge";
 
 const REACTIONS = [
   { type: "like",  emoji: "👍", label: "Like"  },
@@ -33,25 +33,28 @@ function timeAgo(dateInput) {
   return `${days}d`;
 }
 
+/** Read a lightweight current user snapshot (now includes role) */
 function useCurrentUserLite() {
   return useMemo(() => {
     try {
       const raw = localStorage.getItem("user");
       if (raw) {
         const u = JSON.parse(raw);
-        return { id: u?.id || u?._id, pseudonym: u?.pseudonym, avatarURL: u?.avatarURL || u?.avatar };
+        return {
+          id: u?.id || u?._id || null,
+          pseudonym: u?.pseudonym || null,
+          avatarURL: u?.avatarURL || u?.avatar || null,
+          role: u?.role || "user",
+        };
       }
     } catch {}
-    return { id: null, pseudonym: null, avatarURL: null };
+    return { id: null, pseudonym: null, avatarURL: null, role: "user" };
   }, []);
 }
 
 function ExpireCountdown({ expiresAt }) {
   const [now, setNow] = useState(Date.now());
-  useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), 60000);
-    return () => clearInterval(t);
-  }, []);
+  useEffect(() => { const t = setInterval(() => setNow(Date.now()), 60000); return () => clearInterval(t); }, []);
   if (!expiresAt) return null;
   const ms = new Date(expiresAt).getTime() - now;
   if (ms <= 0) return <span className="text-rose-500 text-xs">expired</span>;
@@ -60,16 +63,14 @@ function ExpireCountdown({ expiresAt }) {
   return <span className="text-xs text-zinc-500">{h}h {m}m left</span>;
 }
 
-/* ----------------- helpers for deleted/anonymized users ----------------- */
+/* Deleted/anonymized helpers */
 function isDeletedUser(u) {
-  // server sets deletedAt; fall back to heuristic (pseudonym like deleted-xxxxx) if needed
   return !!u?.deletedAt || (typeof u?.pseudonym === "string" && /^deleted[-_]/i.test(u.pseudonym));
 }
 
-/* ---------- Compact embed for originalPost ---------- */
+/* Embedded original (for reshares) */
 function EmbeddedOriginal({ orig, onClickGroup, nav }) {
   if (!orig) return null;
-
   const scope = orig?.scope;
   const pageInfo  = orig?.page;
   const groupInfo = orig?.group;
@@ -99,9 +100,7 @@ function EmbeddedOriginal({ orig, onClickGroup, nav }) {
           {displayAvatar ? <img src={displayAvatar} alt="" className="w-full h-full object-cover" /> : null}
         </div>
         {canClick ? (
-          <button onClick={clickName} className="font-semibold hover:underline">
-            {displayName}
-          </button>
+          <button onClick={clickName} className="font-semibold hover:underline">{displayName}</button>
         ) : (
           <span className={`font-semibold ${deletedAuthor ? "text-zinc-500" : ""}`}>{displayName}</span>
         )}
@@ -124,11 +123,10 @@ function EmbeddedOriginal({ orig, onClickGroup, nav }) {
   );
 }
 
-/* ------------------------- identity helpers ------------------------ */
+/* Identity helpers */
 function getPostIdentity(post) {
   const isPagePost = !!post?.page;
   const isGroupPost = !!post?.group;
-
   const a = post?.author || {};
   const deleted = isDeletedUser(a);
 
@@ -140,14 +138,7 @@ function getPostIdentity(post) {
     ? post.page?.avatarURL || ""
     : deleted ? "" : (a.avatarURL || "");
 
-  let subtitle = "";
-  if (isGroupPost) {
-    const by = deleted ? "Deleted user" : (a.pseudonym || "Someone");
-    const gname = post.group?.name || "Group";
-    subtitle = `${by} · in ${gname}`;
-  }
-
-  return { primaryName, primaryAvatar, subtitle, isPagePost, isGroupPost, deletedAuthor: deleted };
+  return { primaryName, primaryAvatar, isPagePost, isGroupPost, deletedAuthor: deleted };
 }
 
 export default function PostCard({ post, readOnly = false, onAction }) {
@@ -172,22 +163,16 @@ export default function PostCard({ post, readOnly = false, onAction }) {
     () => String(data?.author?._id || data?.author) === String(me.id),
     [data, me]
   );
+  const isAdmin = String(me?.role || "") === "admin";
+  const canDelete = iOwnThis || isAdmin;
 
   const menuRef = useRef(null);
   useEffect(() => {
-    function onClick(e) {
-      if (!menuRef.current) return;
-      if (!menuRef.current.contains(e.target)) setMenuOpen(false);
-    }
-    function onKey(e) {
-      if (e.key === "Escape") setMenuOpen(false);
-    }
+    function onClick(e) { if (!menuRef.current) return; if (!menuRef.current.contains(e.target)) setMenuOpen(false); }
+    function onKey(e) { if (e.key === "Escape") setMenuOpen(false); }
     document.addEventListener("click", onClick);
     document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("click", onClick);
-      document.removeEventListener("keydown", onKey);
-    };
+    return () => { document.removeEventListener("click", onClick); document.removeEventListener("keydown", onKey); };
   }, []);
 
   // Bookmark IDs cache (load once)
@@ -201,27 +186,21 @@ export default function PostCard({ post, readOnly = false, onAction }) {
     return () => { alive = false; };
   }, [data?._id]);
 
-  // Load fact-check result (lightweight)
+  // fact-check load
   useEffect(() => {
     let alive = true;
     async function run() {
-      try {
-        const fc = await getFactCheck(data?._id);
-        if (!alive) return;
-        setFactcheck(fc || null);
-      } catch {
-      } finally {
-        if (alive) setFcLoaded(true);
-      }
+      try { const fc = await getFactCheck(data?._id); if (!alive) return; setFactcheck(fc || null); }
+      catch {}
+      finally { if (alive) setFcLoaded(true); }
     }
     if (data?._id) run();
     return () => { alive = false; };
   }, [data?._id]);
 
-  // ------------ Optimistic React ------------
+  // reactions (optimistic)
   async function handleReact(type) {
     if (readOnly || !data?._id) return;
-
     const uid = String(me.id || "");
     setData(prev => {
       if (!prev) return prev;
@@ -232,7 +211,6 @@ export default function PostCard({ post, readOnly = false, onAction }) {
       else reactions[i].type = type;
       return { ...prev, reactions };
     });
-
     try {
       const updated = await reactToPost(data._id, type);
       setData(updated?.post || updated || data);
@@ -260,13 +238,8 @@ export default function PostCard({ post, readOnly = false, onAction }) {
       addToast("Posts from private groups can’t be shared.", "error");
       return;
     }
-    try {
-      await sharePost(data._id);
-      addToast("Shared", "success");
-      onAction?.();
-    } catch (e) {
-      addToast(e?.response?.data?.message || "Failed to share", "error");
-    }
+    try { await sharePost(data._id); addToast("Shared", "success"); onAction?.(); }
+    catch (e) { addToast(e?.response?.data?.message || "Failed to share", "error"); }
   }
 
   async function handleDelete() {
@@ -314,9 +287,7 @@ export default function PostCard({ post, readOnly = false, onAction }) {
 
   const reactionCounts = useMemo(() => {
     const map = Object.create(null);
-    (data?.reactions || []).forEach(r => {
-      map[r.type] = (map[r.type] || 0) + 1;
-    });
+    (data?.reactions || []).forEach(r => { map[r.type] = (map[r.type] || 0) + 1; });
     return map;
   }, [data?.reactions]);
 
@@ -324,9 +295,7 @@ export default function PostCard({ post, readOnly = false, onAction }) {
     Object.entries(reactionCounts)
       .sort((a, b) => b[1] - a[1])
       .slice(0, 3)
-      .map(([type, n]) => ({
-        type, n, emoji: REACTIONS.find(x => x.type === type)?.emoji || "🙂",
-      }))
+      .map(([type, n]) => ({ type, n, emoji: REACTIONS.find(x => x.type === type)?.emoji || "🙂" }))
   , [reactionCounts]);
 
   const totalReactions = (data?.reactions || []).length;
@@ -363,7 +332,6 @@ export default function PostCard({ post, readOnly = false, onAction }) {
                   </span>
                 )}
 
-                {/* ✅ Trust badge restored (skip for deleted users) */}
                 {(isPagePost ? data?.page?._id : data?.author?._id) && !deletedAuthor ? (
                   <TrustBadge
                     subjectType={isPagePost ? "page" : "user"}
@@ -377,19 +345,14 @@ export default function PostCard({ post, readOnly = false, onAction }) {
                 <ExpireCountdown expiresAt={data?.expiresAt} />
               </div>
 
-              {isGroupPost && (
+              {getPostIdentity(data).isGroupPost && (
                 <div className="text-xs text-zinc-500 truncate">
                   by {deletedAuthor ? "Deleted user" : (data?.author?.pseudonym || "Someone")} ·{" "}
                   {data?.group?._id ? (
-                    <button
-                      onClick={() => nav(`/groups/${data.group._id}`)}
-                      className="hover:underline"
-                    >
+                    <button onClick={() => nav(`/groups/${data.group._id}`)} className="hover:underline">
                       in {data.group.name || "Group"}
                     </button>
-                  ) : (
-                    <>in {data?.group?.name || "Group"}</>
-                  )}
+                  ) : (<>in {data?.group?.name || "Group"}</>)}
                 </div>
               )}
             </div>
@@ -427,7 +390,8 @@ export default function PostCard({ post, readOnly = false, onAction }) {
                     <span>Report…</span>
                   </button>
 
-                  {iOwnThis && (
+                  {/* ▼ Admin OR Owner can delete */}
+                  {canDelete && (
                     <button
                       type="button"
                       className="w-full text-left px-4 py-2 text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/30 flex items-center gap-2"
@@ -480,7 +444,15 @@ export default function PostCard({ post, readOnly = false, onAction }) {
                       : "border-sky-500 text-sky-600 dark:text-sky-400"}`}
                   title="Click to see context details"
                 >
-                  {contextLabel}
+                  {factcheck?.label || (
+                    factcheck?.verdict === "true" ? "✅ Likely true" :
+                    factcheck?.verdict === "false" ? "⚠️ Likely false" :
+                    factcheck?.verdict === "misleading" ? "Context needed" :
+                    factcheck?.verdict === "outdated" ? "Outdated" :
+                    factcheck?.verdict === "satire" ? "Satire / parody" :
+                    factcheck?.verdict === "opinion" ? "Opinion / not checkable" :
+                    "Context suggested"
+                  )}
                 </button>
               </div>
             );
@@ -501,18 +473,14 @@ export default function PostCard({ post, readOnly = false, onAction }) {
                   : "React"}
               </button>
 
-              <div
-                className="absolute hidden group-hover:flex -top-14 left-0 z-20 px-3 py-2 rounded-full border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-950 shadow-lg gap-3"
-              >
+              <div className="absolute hidden group-hover:flex -top-14 left-0 z-20 px-3 py-2 rounded-full border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-950 shadow-lg gap-3">
                 {REACTIONS.map((r) => (
                   <button
                     key={r.type}
                     type="button"
                     onClick={() => handleReact(r.type)}
                     className={`text-2xl leading-none p-1.5 rounded-full transition
-                      ${myReaction === r.type
-                        ? "ring-2 ring-emerald-500"
-                        : "hover:bg-zinc-100 dark:hover:bg-zinc-900"}`}
+                      ${myReaction === r.type ? "ring-2 ring-emerald-500" : "hover:bg-zinc-100 dark:hover:bg-zinc-900"}`}
                     title={r.label}
                   >
                     {r.emoji}
@@ -584,7 +552,6 @@ export default function PostCard({ post, readOnly = false, onAction }) {
               const cDeleted = isDeletedUser(cu);
               const cName = cDeleted ? "Deleted user" : (cu?.pseudonym || "User");
               const cAvatar = cDeleted ? "" : (cu?.avatarURL || "");
-
               return (
                 <div key={c._id || i} className="flex items-start gap-3">
                   <div className="w-8 h-8 rounded-full bg-zinc-300 dark:bg-zinc-700 overflow-hidden shrink-0">
@@ -592,9 +559,7 @@ export default function PostCard({ post, readOnly = false, onAction }) {
                   </div>
                   <div className="flex-1">
                     <div className="text-sm">
-                      <span className={`font-semibold mr-2 ${cDeleted ? "text-zinc-500" : ""}`}>
-                        {cName}
-                      </span>
+                      <span className={`font-semibold mr-2 ${cDeleted ? "text-zinc-500" : ""}`}>{cName}</span>
                       <span className="text-xs text-zinc-500">{timeAgo(c?.createdAt)}</span>
                     </div>
                     <div className="mt-1 whitespace-pre-wrap text-sm">{c?.text || c?.body}</div>

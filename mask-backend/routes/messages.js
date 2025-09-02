@@ -1,15 +1,14 @@
 // mask-backend/routes/messages.js
-
 const express = require("express");
 const router = express.Router();
 const { Types } = require("mongoose");
 const jwt = require("jsonwebtoken");
 const Conversation = require("../models/Conversation");
 const Message = require("../models/Message");
+const { encrypt, decrypt } = require("../utils/msgCrypto");
 
 /* -------- auth helpers (compatible with cookie/JWT or session) -------- */
 function getUserIdFromReq(req) {
-  // 1) session / passport style
   const sessionId =
     req.user?.id ||
     req.user?._id ||
@@ -17,33 +16,23 @@ function getUserIdFromReq(req) {
     req.session?.user?._id;
   if (sessionId) return String(sessionId);
 
-  // 2) JWT cookie (common names)
-  const possibleCookies = [
-    "token",
-    "jwt",
-    "access_token",
-    "session_token",
-    "auth_token",
-  ];
+  const possibleCookies = ["token", "jwt", "access_token", "session_token", "auth_token"];
   for (const name of possibleCookies) {
     const raw = req.cookies?.[name];
     if (!raw) continue;
     try {
       const payload = jwt.verify(raw, process.env.JWT_SECRET);
-      const uid =
-        payload?.id || payload?._id || payload?.userId || payload?.sub;
+      const uid = payload?.id || payload?._id || payload?.userId || payload?.sub;
       if (uid) return String(uid);
     } catch (_) {}
   }
 
-  // 3) Authorization: Bearer <token>
   const auth = req.headers?.authorization || "";
   if (auth.startsWith("Bearer ")) {
     const token = auth.slice(7);
     try {
       const payload = jwt.verify(token, process.env.JWT_SECRET);
-      const uid =
-        payload?.id || payload?._id || payload?.userId || payload?.sub;
+      const uid = payload?.id || payload?._id || payload?.userId || payload?.sub;
       if (uid) return String(uid);
     } catch (_) {}
   }
@@ -56,11 +45,7 @@ function getAuthUserId(req) {
 }
 
 function toId(v) {
-  try {
-    return new Types.ObjectId(String(v));
-  } catch {
-    return null;
-  }
+  try { return new Types.ObjectId(String(v)); } catch { return null; }
 }
 const keyFor = (a, b) => [String(a), String(b)].sort().join(":");
 
@@ -68,7 +53,7 @@ async function isParticipant(cid, uid) {
   return !!(await Conversation.exists({ _id: cid, participants: uid }));
 }
 
-/* --------- middlewares: strict & soft (no auto-logout on GETs) --------- */
+/* ---------------- helpers: auth middlewares ---------------- */
 function requireAuthStrict(req, res, next) {
   const uid = getAuthUserId(req);
   if (!uid) return res.status(401).json({ message: "Unauthorized" });
@@ -81,18 +66,25 @@ function maybeAuth(req, _res, next) {
   next();
 }
 
+/* ---------------- small helper: unify plaintext ---------------- */
+function msgPlainText(doc) {
+  if (!doc) return "";
+  if (doc.text) return doc.text;                 // old rows
+  if (doc.encrypted && doc.encrypted.ct) return decrypt(doc.encrypted);
+  return "";
+}
+
 /* ---------------------------- endpoints ---------------------------- */
 
-/* Unread badge — returns {count:0} if not logged in (prevents axios logout) */
+/* Unread badge — returns {count:0} if not logged in */
 router.get("/unread-count", maybeAuth, async (req, res) => {
   const uid = req.authUserId;
   if (!uid) return res.json({ count: 0 });
 
   const me = toId(uid);
-  const convs = await Conversation.find({ participants: me })
-    .select("_id")
-    .lean();
+  const convs = await Conversation.find({ participants: me }).select("_id").lean();
   if (!convs.length) return res.json({ count: 0 });
+
   const ids = convs.map((c) => c._id);
   const count = await Message.countDocuments({
     conversation: { $in: ids },
@@ -123,10 +115,10 @@ router.post("/with/:userId", requireAuthStrict, async (req, res) => {
   res.json({ id: String(convo._id || convo.id) });
 });
 
-/* List conversations — returns [] if not logged in (prevents axios logout) */
+/* List conversations — returns [] if not logged in */
 router.get("/conversations", maybeAuth, async (req, res) => {
   const uid = req.authUserId;
-  if (!uid) return res.json([]); // not logged in -> harmless empty list
+  if (!uid) return res.json([]);
 
   const me = toId(uid);
   const list = await Conversation.find({ participants: me })
@@ -135,11 +127,19 @@ router.get("/conversations", maybeAuth, async (req, res) => {
 
   const result = await Promise.all(
     list.map(async (c) => {
-      const last = c.lastMessage?.text
-        ? c.lastMessage
-        : await Message.findOne({ conversation: c._id })
-            .sort({ createdAt: -1 })
-            .lean();
+      // Always fetch most recent message doc and decrypt on the fly
+      const lastDoc = await Message.findOne({ conversation: c._id })
+        .sort({ createdAt: -1 })
+        .lean();
+
+      const lastMessage = lastDoc
+        ? {
+            id: String(lastDoc._id || ""),
+            text: msgPlainText(lastDoc),
+            createdAt: lastDoc.createdAt,
+            senderId: String(lastDoc.sender),
+          }
+        : null;
 
       const unread = await Message.countDocuments({
         conversation: c._id,
@@ -152,16 +152,8 @@ router.get("/conversations", maybeAuth, async (req, res) => {
         participants: (c.participants || []).map((id) => ({
           id: String(id),
           isSelf: String(id) === String(me),
-          // name/avatar can be populated later if you want
         })),
-        lastMessage: last
-          ? {
-              id: String(last._id || ""),
-              text: last.text,
-              createdAt: last.createdAt,
-              senderId: String(last.sender),
-            }
-          : null,
+        lastMessage,
         unread,
       };
     })
@@ -175,7 +167,6 @@ router.get("/:conversationId", requireAuthStrict, async (req, res) => {
   const me = toId(req.authUserId);
   const cid = toId(req.params.conversationId);
   if (!cid) return res.status(400).json({ message: "Invalid conversationId" });
-
   if (!(await isParticipant(cid, me)))
     return res.status(403).json({ message: "Forbidden" });
 
@@ -192,9 +183,9 @@ router.get("/:conversationId", requireAuthStrict, async (req, res) => {
       id: String(m._id),
       conversationId: String(m.conversation),
       senderId: String(m.sender),
-      text: m.text,
+      text: msgPlainText(m),       // << decrypted or legacy plaintext
       createdAt: m.createdAt,
-      status: m.readBy?.some((x) => String(x) === String(me)) ? "read" : "delivered",
+      status: (m.readBy || []).some((x) => String(x) === String(me)) ? "read" : "delivered",
     }))
   );
 });
@@ -206,22 +197,24 @@ router.post("/:conversationId", requireAuthStrict, async (req, res) => {
   const text = (req.body?.text || "").trim();
   if (!cid) return res.status(400).json({ message: "Invalid conversationId" });
   if (!text) return res.status(400).json({ message: "Empty message" });
-
   if (!(await isParticipant(cid, me)))
     return res.status(403).json({ message: "Forbidden" });
 
+  // Encrypt before saving
+  const enc = encrypt(text);
   const msg = await Message.create({
     conversation: cid,
     sender: me,
-    text,
+    encrypted: enc,   // << store only ciphertext for new rows
     readBy: [me],
   });
 
+  // Do NOT store plaintext in conversation doc
   await Conversation.findByIdAndUpdate(
     cid,
     {
       lastMessageAt: msg.createdAt,
-      lastMessage: { text: msg.text, sender: me, createdAt: msg.createdAt },
+      lastMessage: { sender: me, createdAt: msg.createdAt }, // no text
       updatedAt: new Date(),
     },
     { new: false }
@@ -231,7 +224,7 @@ router.post("/:conversationId", requireAuthStrict, async (req, res) => {
     id: String(msg._id),
     conversationId: String(msg.conversation),
     senderId: String(msg.sender),
-    text: msg.text,
+    text,                     // << plaintext only in API response
     createdAt: msg.createdAt,
     status: "read",
   });
@@ -242,7 +235,6 @@ router.post("/:conversationId/read", requireAuthStrict, async (req, res) => {
   const me = toId(req.authUserId);
   const cid = toId(req.params.conversationId);
   if (!cid) return res.status(400).json({ message: "Invalid conversationId" });
-
   if (!(await isParticipant(cid, me)))
     return res.status(403).json({ message: "Forbidden" });
 

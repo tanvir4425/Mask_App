@@ -82,6 +82,10 @@ app.use("/api", require("./routes/adminBootstrap"));
 app.use("/api/admin", require("./routes/adminUsers"));
 app.use("/api", require("./routes/admin.users"));
 
+
+app.use("/api/link-preview", require("./routes/linkPreview"));
+app.use("/api/links", require("./routes/links"));
+
 if (process.env.NODE_ENV !== "production") {
   try { app.use("/api/dev", require("./routes/devFactcheck")); } catch {}
 }

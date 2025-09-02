@@ -16,6 +16,9 @@ const Page = require("../models/Page");
 const FactCheckResult = require("../models/FactCheckResult"); // used for Trending throttle
 const { enqueueFactCheck } = require("../services/factcheckWorker"); // ✅ enqueue fact-checks
 
+// ✅ link preview helpers
+const { findFirstUrl, fetchLinkPreview } = require("../utils/linkPreview");
+
 const router = express.Router();
 const ALLOWED_REACTIONS = ["like", "love", "care", "haha", "wow", "sad", "angry"];
 
@@ -184,6 +187,18 @@ router.post(
         }
       }
 
+      // ✅ Try to enrich with link preview (non-blocking, short timeout)
+      let linkPreview = null;
+      try {
+        const firstUrl = findFirstUrl(text);
+        if (firstUrl) {
+          linkPreview = await Promise.race([
+            fetchLinkPreview(firstUrl),
+            new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 3000)),
+          ]).catch(() => null);
+        }
+      } catch { /* ignore */ }
+
       const post = await Post.create({
         author: uid,
         text,
@@ -194,6 +209,7 @@ router.post(
         isProtected: !!isAdmin,
         retention: isAdmin ? "permanent" : "normal",
         expiresAt,
+        ...(linkPreview ? { linkPreview } : {}),
       });
 
       // ✅ queue an immediate fact-check for this post

@@ -336,6 +336,12 @@ export async function getTrustSnapshot(type, id) {
   return data;
 }
 
+/* -------------------------------- Link Preview ---------------------------- */
+export async function fetchLinkPreview(url) {
+  const { data } = await axios.get(`/link-preview?url=${encodeURIComponent(url)}`);
+  return data;
+}
+
 /* ---------------------------------- Admin -------------------------------- */
 export function setAdminKey(k) {
   try { k ? localStorage.setItem("adminKey", k) : localStorage.removeItem("adminKey"); } catch {}
@@ -404,6 +410,14 @@ export async function updateMotivationPrefs(payload) {
   });
   return data;
 }
+
+// --- Link previews (unfurl) ---
+export async function unfurlLink(url) {
+  const { data } = await axios.get(`/links/unfurl?url=${encodeURIComponent(url)}`);
+  return data; // { ok, url, canonicalUrl, domain, title, description, image, siteName }
+}
+
+
 
 /* exports for reuse elsewhere */
 export { axios as http, API_BASE, API_ORIGIN };

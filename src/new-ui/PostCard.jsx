@@ -3,13 +3,14 @@ import React, { useMemo, useState, useRef, useEffect } from "react";
 import { Repeat2, MoreHorizontal, Trash2 } from "lucide-react";
 import {
   reactToPost, commentOnPost, sharePost, deletePost,
-  toggleBookmark, loadBookmarkIdsCache, isBookmarkedLocally, getFactCheck, getPost,
+  toggleBookmark, loadBookmarkIdsCache, isBookmarkedLocally, getFactCheck, getPost, unfurlLink,
 } from "./api";
 import { useToast } from "../context/ToastContext";
 import { openReportDialog } from "./reportDialog";
 import { useNavigate } from "react-router-dom";
 import FactcheckSheet from "./components/FactcheckSheet";
 import TrustBadge from "./components/TrustBadge";
+import LinkPreviewCard from "./components/LinkPreviewCard";
 
 const REACTIONS = [
   { type: "like",  emoji: "👍", label: "Like"  },
@@ -66,6 +67,44 @@ function ExpireCountdown({ expiresAt }) {
 /* Deleted/anonymized helpers */
 function isDeletedUser(u) {
   return !!u?.deletedAt || (typeof u?.pseudonym === "string" && /^deleted[-_]/i.test(u.pseudonym));
+}
+
+/* Extract first http(s) URL from text */
+const URL_RE = /https?:\/\/[^\s)<>{}]+/i;
+function extractFirstURL(text = "") {
+  const m = String(text).match(URL_RE);
+  return m ? m[0] : "";
+}
+/** Linkify text without showing ugly long query strings */
+function linkify(text = "") {
+  const nodes = [];
+  let lastIndex = 0;
+  text.replace(new RegExp(URL_RE, "gi"), (m, idx) => {
+    // push text before
+    if (idx > lastIndex) nodes.push(text.slice(lastIndex, idx));
+    lastIndex = idx + m.length;
+    let label = m;
+    try {
+      const u = new URL(m);
+      // display domain + first path segment only (nicer)
+      const seg = u.pathname.replace(/\/+$/, "").split("/").filter(Boolean)[0] || "";
+      label = u.hostname.replace(/^www\./, "") + (seg ? `/${seg}` : "");
+    } catch {}
+    nodes.push(
+      <a
+        key={`${idx}-${m.length}`}
+        href={m}
+        className="text-sky-600 hover:underline break-all"
+        target="_blank"
+        rel="noopener noreferrer"
+      >
+        {label}
+      </a>
+    );
+    return m;
+  });
+  if (lastIndex < text.length) nodes.push(text.slice(lastIndex));
+  return nodes.length ? nodes : [text];
 }
 
 /* Embedded original (for reshares) */
@@ -158,6 +197,33 @@ export default function PostCard({ post, readOnly = false, onAction }) {
   const [factcheck, setFactcheck] = useState(null);
   const [fcLoaded, setFcLoaded] = useState(false);
   const [fcOpen, setFcOpen] = useState(false);
+
+  // link preview
+  const [urlMeta, setUrlMeta] = useState(null);
+  const firstUrl = useMemo(() => extractFirstURL(data?.text || ""), [data?.text]);
+  const onlyUrlText = useMemo(() => {
+    const t = String(data?.text || "").trim();
+    return firstUrl && t === firstUrl;
+  }, [data?.text, firstUrl]);
+
+  useEffect(() => {
+    let alive = true;
+    async function run() {
+      setUrlMeta(null);
+      if (!firstUrl) return;
+      try {
+        const meta = await unfurlLink(firstUrl);
+        if (!alive) return;
+        if (meta?.ok !== false && (meta?.title || meta?.image)) {
+          setUrlMeta(meta);
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+    run();
+    return () => { alive = false; };
+  }, [firstUrl]);
 
   const iOwnThis = useMemo(
     () => String(data?.author?._id || data?.author) === String(me.id),
@@ -269,14 +335,6 @@ export default function PostCard({ post, readOnly = false, onAction }) {
   const orig = data?.originalPost;
 
   const showContext = fcLoaded && !!factcheck;
-  const contextLabel =
-    factcheck?.verdict === "true"       ? "✅ Likely true" :
-    factcheck?.verdict === "false"      ? "⚠️ Likely false" :
-    factcheck?.verdict === "misleading" ? "Context needed" :
-    factcheck?.verdict === "outdated"   ? "Outdated" :
-    factcheck?.verdict === "satire"     ? "Satire / parody" :
-    factcheck?.verdict === "opinion"    ? "Opinion / not checkable" :
-    "Context suggested";
 
   const myReaction = useMemo(() => {
     const uid = String(me.id || "");
@@ -345,7 +403,7 @@ export default function PostCard({ post, readOnly = false, onAction }) {
                 <ExpireCountdown expiresAt={data?.expiresAt} />
               </div>
 
-              {getPostIdentity(data).isGroupPost && (
+              {isGroupPost && (
                 <div className="text-xs text-zinc-500 truncate">
                   by {deletedAuthor ? "Deleted user" : (data?.author?.pseudonym || "Someone")} ·{" "}
                   {data?.group?._id ? (
@@ -391,7 +449,7 @@ export default function PostCard({ post, readOnly = false, onAction }) {
                   </button>
 
                   {/* ▼ Admin OR Owner can delete */}
-                  {canDelete && (
+                  {(iOwnThis || isAdmin) && (
                     <button
                       type="button"
                       className="w-full text-left px-4 py-2 text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/30 flex items-center gap-2"
@@ -406,11 +464,16 @@ export default function PostCard({ post, readOnly = false, onAction }) {
           </div>
 
           {/* content (original posts) */}
-          {!isReshare && data?.text && (
-            <div className="mt-1 whitespace-pre-wrap text-[15px] leading-relaxed">
-              {data.text}
+          {!isReshare && data?.text && !onlyUrlText && (
+            <div className="mt-1 whitespace-pre-wrap text-[15px] leading-relaxed break-words">
+              {linkify(data.text)}
             </div>
           )}
+
+          {/* link preview (for first URL in post text) */}
+          {!isReshare && urlMeta ? <LinkPreviewCard meta={urlMeta} /> : null}
+
+          {/* original image uploaded with the post */}
           {!isReshare && data?.image && (
             <div className="mt-3 rounded-2xl overflow-hidden border border-zinc-200 dark:border-zinc-800">
               <img src={data.image} alt="" className="w-full object-cover" />
@@ -429,30 +492,27 @@ export default function PostCard({ post, readOnly = false, onAction }) {
           {/* context pill */}
           {(() => {
             if (!showContext) return null;
+            const verdict = factcheck?.verdict;
+            const cls =
+              verdict === "false" ? "border-rose-500 text-rose-600 dark:text-rose-400" :
+              verdict === "misleading" ? "border-amber-500 text-amber-600 dark:text-amber-400" :
+              verdict === "true" ? "border-emerald-500 text-emerald-600 dark:text-emerald-400" :
+              "border-sky-500 text-sky-600 dark:text-sky-400";
             return (
               <div className="mt-3">
                 <button
                   type="button"
                   onClick={() => setFcOpen(true)}
-                  className={`px-2 py-1 rounded-full text-xs border
-                    ${factcheck?.verdict === "false"
-                      ? "border-rose-500 text-rose-600 dark:text-rose-400"
-                      : factcheck?.verdict === "misleading"
-                      ? "border-amber-500 text-amber-600 dark:text-amber-400"
-                      : factcheck?.verdict === "true"
-                      ? "border-emerald-500 text-emerald-600 dark:text-emerald-400"
-                      : "border-sky-500 text-sky-600 dark:text-sky-400"}`}
+                  className={`px-2 py-1 rounded-full text-xs border ${cls}`}
                   title="Click to see context details"
                 >
-                  {factcheck?.label || (
-                    factcheck?.verdict === "true" ? "✅ Likely true" :
-                    factcheck?.verdict === "false" ? "⚠️ Likely false" :
-                    factcheck?.verdict === "misleading" ? "Context needed" :
-                    factcheck?.verdict === "outdated" ? "Outdated" :
-                    factcheck?.verdict === "satire" ? "Satire / parody" :
-                    factcheck?.verdict === "opinion" ? "Opinion / not checkable" :
-                    "Context suggested"
-                  )}
+                  {verdict === "true" ? "✅ Likely true" :
+                   verdict === "false" ? "⚠️ Likely false" :
+                   verdict === "misleading" ? "Context needed" :
+                   verdict === "outdated" ? "Outdated" :
+                   verdict === "satire" ? "Satire / parody" :
+                   verdict === "opinion" ? "Opinion / not checkable" :
+                   "Context suggested"}
                 </button>
               </div>
             );

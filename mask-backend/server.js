@@ -1,3 +1,4 @@
+// server.js
 require("dotenv").config();
 
 const express = require("express");
@@ -13,12 +14,13 @@ const app = express();
 // Behind proxy (Render) + helpful for cookies/ratelimit
 app.set("trust proxy", 1);
 
+// Security headers
 app.use(helmet({ crossOriginResourcePolicy: false }));
 
 // Build allow-list from env, with SAFE defaults for dev
 let allowList = (process.env.CORS_ORIGINS || process.env.CLIENT_ORIGIN || "")
   .split(",")
-  .map(s => s.trim())
+  .map((s) => s.trim())
   .filter(Boolean);
 
 if (!allowList.length && process.env.NODE_ENV !== "production") {
@@ -30,6 +32,7 @@ if (!allowList.length && process.env.NODE_ENV !== "production") {
   ];
 }
 
+// CORS (credentialed)
 app.use(
   cors({
     origin(origin, cb) {
@@ -41,6 +44,7 @@ app.use(
   })
 );
 
+// Parsers & cookies
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 app.use(cookieParser());
@@ -48,7 +52,9 @@ app.use(cookieParser());
 // Keep /uploads for dev/back-compat (prod will use Cloudinary)
 const uploadsDir = path.join(__dirname, "uploads");
 if (!fs.existsSync(uploadsDir)) {
-  try { fs.mkdirSync(uploadsDir, { recursive: true }); } catch {}
+  try {
+    fs.mkdirSync(uploadsDir, { recursive: true });
+  } catch {}
 }
 app.use("/uploads", express.static(uploadsDir, { maxAge: "1d", index: false }));
 
@@ -82,29 +88,55 @@ app.use("/api", require("./routes/adminBootstrap"));
 app.use("/api/admin", require("./routes/adminUsers"));
 app.use("/api", require("./routes/admin.users"));
 
-
 app.use("/api/link-preview", require("./routes/linkPreview"));
 app.use("/api/links", require("./routes/links"));
 
+// Dev-only helpers
 if (process.env.NODE_ENV !== "production") {
-  try { app.use("/api/dev", require("./routes/devFactcheck")); } catch {}
+  try {
+    app.use("/api/dev", require("./routes/devFactcheck"));
+  } catch {}
+  try {
+    app.use("/api/dev", require("./routes/devAi")); // ⟵ Gemini test endpoint
+    console.log("[dev] /api/dev routes enabled");
+  } catch {}
 }
 
+// Simple health endpoint (handy for Render/Vercel checks)
+app.get("/api/health", (_req, res) =>
+  res.status(200).json({ ok: true, env: process.env.NODE_ENV || "development" })
+);
+
+// Root ping
 app.get("/", (_req, res) => res.send("Mask API is running 🚀"));
+
+// --------------------------- ERROR HANDLERS ---------------------------
+// Make CORS denials return JSON instead of crashing
+app.use((err, _req, res, next) => {
+  if (err && err.message === "Not allowed by CORS") {
+    return res.status(403).json({ error: "CORS origin not allowed" });
+  }
+  return next(err);
+});
 
 (async () => {
   try {
     await connectDB();
+
+    // Best-effort background workers
     try {
       require("./services/motivationDailyWorker");
       require("./services/postRetentionWorker").start();
     } catch (e) {
       console.warn("[workers] failed to start:", e?.message || e);
     }
+
     const PORT = process.env.PORT || 5000;
     app.listen(PORT, () => {
       console.log(`🚀 Server running on http://localhost:${PORT}`);
     });
+
+    // Optional periodic recheck cron (you can disable via env on free tier)
     try {
       if (process.env.TRUST_RECHECK_ENABLED === "1") {
         const { startRecheckCron } = require("./services/recheckCron");

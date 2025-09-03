@@ -25,6 +25,19 @@ const ALLOWED_REACTIONS = ["like", "love", "care", "haha", "wow", "sad", "angry"
 // Cloudinary toggle
 const { isEnabled: CLOUD_ON, uploadBuffer } = require("../utils/cloudinary");
 
+/* ----------------------------- auto-trigger knobs ----------------------------- */
+// Thresholds: only auto-check "hot" posts.
+const REACTS_THRESHOLD = parseInt(process.env.TRUST_AUTOTRIGGER_REACTS || "2", 10);
+const UNIQUE_THRESHOLD = parseInt(process.env.TRUST_AUTOTRIGGER_UNIQUE_USERS || "2", 10);
+// Cooldown to avoid spamming the queue if a post stays above the threshold (minutes → ms)
+const AUTOTRIGGER_COOLDOWN_MS =
+  (parseInt(process.env.TRUST_AUTOTRIGGER_COOLDOWN_MINUTES || "60", 10) || 60) * 60 * 1000;
+// One-and-done guard (if enabled in env)
+const ONLY_ONCE = String(process.env.TRUST_FACTCHECK_ONLY_ONCE || "1") === "1";
+
+// In-memory "recently queued" map (postId -> timestamp)
+const __recentAutoFC = new Map();
+
 /* --------------------------------- uploads -------------------------------- */
 const uploadsDir = path.join(__dirname, "..", "uploads");
 if (!fs.existsSync(uploadsDir)) {
@@ -122,6 +135,49 @@ async function buildForYouFilter(userId) {
 const createLimiter = rateLimit({ windowMs: 60 * 1000, max: 60, standardHeaders: true, legacyHeaders: false });
 const toggleLimiter = rateLimit({ windowMs: 60 * 1000, max: 120, standardHeaders: true, legacyHeaders: false });
 
+/* ------------------------------ auto-trigger fn ------------------------------ */
+async function maybeAutoFactcheck(post) {
+  try {
+    if (!post) return;
+
+    // Hard "only once" guard (skip if any result exists)
+    if (ONLY_ONCE) {
+      const already = await FactCheckResult.exists({ post: post._id });
+      if (already) return;
+    } else {
+      // Else: If latest verdict is non-unverified, do nothing.
+      const latest = await FactCheckResult.findOne({ post: post._id })
+        .sort({ createdAt: -1 })
+        .select("verdict createdAt")
+        .lean();
+      if (latest && latest.verdict && latest.verdict !== "unverified") return;
+    }
+
+    // Compute total reactions + unique users
+    const counts = buildReactionCounts(post.reactions || []);
+    const totalReacts = Object.values(counts).reduce((a, b) => a + b, 0);
+    const uniqueUsers = new Set((post.reactions || []).map(r => String(r.user))).size;
+
+    if (totalReacts < REACTS_THRESHOLD || uniqueUsers < UNIQUE_THRESHOLD) return;
+
+    // Cooldown guard so we don't enqueue repeatedly if the post stays hot
+    const key = String(post._id);
+    const last = __recentAutoFC.get(key) || 0;
+    if (Date.now() - last < AUTOTRIGGER_COOLDOWN_MS) return;
+
+    // Enqueue; passing a hint object is safe even if the worker ignores it.
+    try {
+      enqueueFactCheck(post._id, { forceGemini: true, reason: "engagement_threshold" });
+      __recentAutoFC.set(key, Date.now());
+      console.log(`[factcheck] auto-triggered for post=${key} (reactions=${totalReacts}, unique=${uniqueUsers})`);
+    } catch (e) {
+      console.warn("[factcheck] auto-trigger enqueue failed:", e?.message || e);
+    }
+  } catch (e) {
+    console.warn("[factcheck] auto-trigger error:", e?.message || e);
+  }
+}
+
 /* -------------------------------- CREATE post ------------------------------- */
 router.post(
   "/",
@@ -212,8 +268,19 @@ router.post(
         ...(linkPreview ? { linkPreview } : {}),
       });
 
-      // ✅ queue an immediate fact-check for this post
-      try { enqueueFactCheck(post._id); } catch (e) { console.warn("[factcheck] enqueue failed:", e?.message || e); }
+      // ✅ optionally queue a fact-check on create (env-controlled)
+      try {
+        const ON_CREATE = String(process.env.TRUST_FACTCHECK_ON_CREATE || "0") === "1";
+        const TAG_ONLY  = String(process.env.TRUST_FACTCHECK_ON_CREATE_TAG_ONLY || "1") === "1";
+        const TRIGGER_TAG = (process.env.TRUST_GEMINI_TRIGGER_TAG || "#verify").toLowerCase();
+        const hasTag = (text || "").toLowerCase().includes(TRIGGER_TAG);
+
+        if (ON_CREATE && (!TAG_ONLY || hasTag)) {
+          enqueueFactCheck(post._id, { reason: "on_create" });
+        }
+      } catch (e) {
+        console.warn("[factcheck] enqueue (on_create) failed:", e?.message || e);
+      }
 
       const populated = await withPopulates(Post.findById(post._id)).lean();
       return res.status(201).json(populated);
@@ -425,6 +492,9 @@ router.post("/:id/react", toggleLimiter, auth, async (req, res) => {
 
     await post.save();
     await applyRetention(post);
+
+    // 🔔 Auto-trigger: high engagement → queue a fact-check (cooldown-protected)
+    try { await maybeAutoFactcheck(post); } catch {}
 
     const populated = await withPopulates(Post.findById(id)).lean();
     const reactionCounts = buildReactionCounts(populated.reactions);

@@ -6,16 +6,39 @@ import {
   Ban, UserCheck, Quote, FileText, LayoutGrid, Filter
 } from "lucide-react";
 
+
 /* ---------------- helpers ---------------- */
-async function fetchJSON(url, options = {}) {
-  const res = await fetch(url, {
-    credentials: "include",
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
-    ...options,
-  });
+async function fetchJSON(path, opts = {}) {
+  const API = process.env.REACT_APP_API_BASE || "";
+  const method = (opts.method || "GET").toUpperCase();
+
+  const headers = { "Content-Type": "application/json", ...(opts.headers || {}) };
+  const init = { credentials: "include", cache: "no-store", headers, ...opts };
+
+  const url0 = API + path;
+  // Add cache-buster for GETs to avoid 304 in Vercel/CDN
+  const url =
+    method === "GET"
+      ? url0 + (url0.includes("?") ? "&" : "?") + "_ts=" + Date.now()
+      : url0;
+
+  let res = await fetch(url, init);
+
+  // If a proxy still returns 304, force one more fresh fetch
+  if (res.status === 304) {
+    const fresh =
+      url0 +
+      (url0.includes("?") ? "&" : "?") +
+      "_ts=" +
+      Date.now() +
+      Math.random().toString(36).slice(2);
+    res = await fetch(fresh, init);
+  }
+
   const text = await res.text();
   let data = {};
   try { data = text ? JSON.parse(text) : {}; } catch { /* tolerate non-JSON */ }
+
   if (!res.ok) {
     const err = new Error(data?.message || `HTTP ${res.status}`);
     err.status = res.status;

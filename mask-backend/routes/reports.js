@@ -1,93 +1,81 @@
 // mask-backend/routes/reports.js
 const express = require("express");
 const { body, validationResult } = require("express-validator");
-const rateLimit = require("express-rate-limit");
+const mongoose = require("mongoose");
 
 const auth = require("../middleware/auth");
 const Report = require("../models/Report");
+const Post = require("../models/Post");
 
 const router = express.Router();
 
-// rate limit: at most 12 reports per minute per IP
-const createLimiter = rateLimit({ windowMs: 60 * 1000, max: 12 });
+/** Quick auth check */
+router.get("/_whoami", auth, (req, res) => {
+  return res.json({ ok: true, userId: req.user?.id || null });
+});
 
 /**
  * POST /api/reports
- * Body:
- *  - targetType: "post" | "comment" | "user"
- *  - postId: required when targetType = "post" or "comment"
- *  - commentId: required when targetType = "comment"
- *  - targetUserId: required when targetType = "user"
- *  - reason: short string ("spam", "abuse", "harassment", "other", etc.)
- *  - note: optional extra details
+ * Body accepts the simple form used by your UI:
+ *   { postId, reason, note? }
+ * We default targetType to "post".
  */
 router.post(
   "/",
-  createLimiter,
   auth,
   [
-    body("targetType")
-      .exists().withMessage("targetType is required")
-      .isIn(["post", "comment", "user"]).withMessage("targetType must be post, comment, or user"),
-
+    body("postId")
+      .exists().withMessage("postId is required")
+      .bail()
+      .custom((v) => mongoose.isValidObjectId(v))
+      .withMessage("postId must be a valid ObjectId"),
     body("reason")
       .exists().withMessage("reason is required")
-      .isLength({ min: 3, max: 100 }).withMessage("reason must be 3-100 chars")
       .bail()
-      .trim(),
-
-    body("note")
-      .optional({ values: "falsy" })
-      .isLength({ max: 400 }).withMessage("note max 400 chars")
-      .bail()
-      .trim(),
-
-    // If post or comment, require postId
-    body("postId")
-      .if((value, { req }) => req.body?.targetType === "post" || req.body?.targetType === "comment")
-      .exists().withMessage("postId is required for post/comment reports")
-      .bail()
-      .isMongoId().withMessage("postId must be a valid id"),
-
-    // If comment, require commentId (string ok if comments are subdocs)
-    body("commentId")
-      .if((value, { req }) => req.body?.targetType === "comment")
-      .exists().withMessage("commentId is required for comment reports")
-      .bail()
-      .isLength({ min: 1, max: 64 }).withMessage("commentId must be 1-64 chars")
-      .bail()
-      .trim(),
-
-    // If user, require targetUserId
-    body("targetUserId")
-      .if((value, { req }) => req.body?.targetType === "user")
-      .exists().withMessage("targetUserId is required for user reports")
-      .bail()
-      .isMongoId().withMessage("targetUserId must be a valid id"),
+      .isString().trim().isLength({ min: 3, max: 100 })
+      .withMessage("reason must be 3–100 characters"),
+    body("note").optional({ values: "falsy" }).isString().trim().isLength({ max: 400 }),
   ],
   async (req, res) => {
     try {
       const errors = validationResult(req);
-      if (!errors.isEmpty()) return res.status(400).json({ message: errors.array()[0].msg });
+      if (!errors.isEmpty()) {
+        return res.status(400).json({ ok: false, errors: errors.array() });
+      }
 
-      const { targetType, postId, commentId, targetUserId, reason, note } = req.body;
+      const { postId, reason, note } = req.body;
 
-      const doc = {
-        reporter: res.locals.userId,
-        targetType,
-        reason: String(reason).trim(),
-        note: note ? String(note).trim().slice(0, 400) : "",
-      };
+      // Load the post being reported
+      const post = await Post.findById(postId).select("_id author").lean();
+      if (!post) {
+        return res.status(404).json({ ok: false, error: "Post not found" });
+      }
 
-      if (targetType === "post" || targetType === "comment") doc.post = postId;
-      if (targetType === "comment") doc.commentId = String(commentId);
-      if (targetType === "user") doc.targetUser = targetUserId;
+      // Self-report guard (compare ObjectId to string safely)
+      if (post.author && String(post.author) === String(req.user.id)) {
+        return res.status(400).json({ ok: false, error: "You cannot report your own post." });
+      }
 
-      const created = await Report.create(doc);
-      return res.json({ ok: true, reportId: created._id });
+      // Normalize reasons a little to keep admin clean
+      const allowed = ["spam", "harassment", "hate", "violence", "nudity", "misinformation", "other"];
+      const normalized = String(reason || "").toLowerCase();
+      const finalReason = allowed.includes(normalized) ? normalized : "other";
+
+      // Create the report
+      const created = await Report.create({
+        reporter: req.user.id,
+        targetType: "post",
+        post: post._id,
+        reason: finalReason,
+        note: note || "",
+        status: "open",
+        createdAt: new Date(),
+      });
+
+      return res.json({ ok: true, reportId: String(created._id) });
     } catch (err) {
       console.error("POST /api/reports error:", err);
-      return res.status(500).json({ message: "Server error" });
+      return res.status(500).json({ ok: false, error: "Server error" });
     }
   }
 );

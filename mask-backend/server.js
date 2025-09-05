@@ -43,6 +43,8 @@ app.use(
     credentials: true,
   })
 );
+app.options(/.*/, cors());
+
 
 // Parsers & cookies
 app.use(express.json({ limit: "10mb" }));
@@ -118,6 +120,7 @@ app.use((err, _req, res, next) => {
   }
   return next(err);
 });
+
 
 (async () => {
   try {
